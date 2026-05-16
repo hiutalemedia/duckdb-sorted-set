@@ -41,6 +41,14 @@ static Value write_int_list(const std::vector<int32_t> &v) {
 	return write_int_list(v.data(), (int32_t)v.size());
 }
 
+static Value write_bigint_list(const std::vector<int64_t> &v) {
+	vector<Value> children;
+	children.reserve(v.size());
+	for (int64_t id : v)
+		children.emplace_back(Value::BIGINT(id));
+	return Value::LIST(LogicalType::BIGINT, std::move(children));
+}
+
 using BinarySetOp = int32_t (*)(const int32_t *, int32_t, const int32_t *, int32_t, int32_t *);
 using BinaryPred = bool (*)(const int32_t *, int32_t, const int32_t *, int32_t);
 
@@ -171,7 +179,7 @@ static void set_min(DataChunk &args, ExpressionState &, Vector &result) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
-		result.SetValue(i, Value::INTEGER(data.front())); // ← was min_element
+		result.SetValue(i, Value::INTEGER(data.front())); // O(1): array is sorted
 	}
 }
 
@@ -189,7 +197,7 @@ static void set_max(DataChunk &args, ExpressionState &, Vector &result) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
-		result.SetValue(i, Value::INTEGER(data.back())); // ← was max_element
+		result.SetValue(i, Value::INTEGER(data.back())); // O(1): array is sorted
 	}
 }
 
@@ -291,18 +299,10 @@ static void set_remove(DataChunk &args, ExpressionState &, Vector &result) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct SetUnionAggState {
-	std::vector<int32_t> *data; // nullptr = no rows seen yet
+	std::vector<int32_t> *data = nullptr;
 };
 
 struct SetUnionAgg {
-	static void Initialize(SetUnionAggState &state) {
-		state.data = nullptr;
-	}
-
-	// Wrapper with exact aggregate_initialize_t signature:
-	//   void (*)(const AggregateFunction&, data_ptr_t)
-	// StateInitialize<> template doesn't resolve cleanly in v1.5.x,
-	// so we provide the function directly.
 	static void InitWrapper(const AggregateFunction &, data_ptr_t state) {
 		reinterpret_cast<SetUnionAggState *>(state)->data = nullptr;
 	}
@@ -313,11 +313,12 @@ struct SetUnionAgg {
 		inputs[0].ToUnifiedFormat(count, idata);
 
 		for (idx_t i = 0; i < count; ++i) {
-			auto idx = idata.sel->get_index(i);
+			// Use selection-vector index for both validity and value lookup.
+			idx_t idx = idata.sel->get_index(i);
 			if (!idata.validity.RowIsValid(idx))
 				continue;
 
-			auto incoming = read_int_list(inputs[0].GetValue(i));
+			auto incoming = read_int_list(inputs[0].GetValue(idx));
 			auto &st = *states[i];
 
 			if (!st.data) {
@@ -335,7 +336,6 @@ struct SetUnionAgg {
 	static void Combine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
 		auto sources = FlatVector::GetData<SetUnionAggState *>(source_vector);
 		auto targets = FlatVector::GetData<SetUnionAggState *>(target_vector);
-
 		for (idx_t i = 0; i < count; ++i) {
 			auto &src = *sources[i];
 			auto &tgt = *targets[i];
@@ -375,13 +375,8 @@ struct SetUnionAgg {
 
 	static AggregateFunction GetFunction() {
 		AggregateFunction func({LogicalType::LIST(LogicalType::INTEGER)}, LogicalType::LIST(LogicalType::INTEGER),
-		                       AggregateFunction::StateSize<SetUnionAggState>, // idx_t (*)() — fine as-is
-		                       InitWrapper, // void (*)(const AggregateFunction&, data_ptr_t)
-		                       Update, Combine, Finalize,
-		                       nullptr, // simple_update
-		                       nullptr, // bind
-		                       Destroy  // void (*)(Vector&, AggregateInputData&, idx_t) — matches directly
-		);
+		                       AggregateFunction::StateSize<SetUnionAggState>, InitWrapper, Update, Combine, Finalize,
+		                       nullptr, nullptr, Destroy);
 		func.name = "set_union_agg";
 		return func;
 	}
@@ -390,25 +385,15 @@ struct SetUnionAgg {
 // ─────────────────────────────────────────────────────────────────────────────
 // set_intersect_agg
 //
-// The critical design point: we CANNOT use an empty set as the identity
-// element for intersection because ∅ ∩ X = ∅ for all X. Instead:
-//   - state.data == nullptr means "no rows seen yet"
-//   - First non-null row SEEDS the state (copies the set directly)
-//   - All subsequent rows INTERSECT with the running state
-//   - NULL rows are skipped (standard SQL aggregate semantics)
-//   - Empty intersection short-circuits (result can only stay empty)
+// state.data == nullptr means no rows seen yet (nullptr, not empty vector).
+// First non-null row seeds the state; empty intersection short-circuits.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct SetIntersectAggState {
-	std::vector<int32_t> *data; // nullptr = no rows seen yet
+	std::vector<int32_t> *data = nullptr;
 };
 
 struct SetIntersectAgg {
-	static void Initialize(SetIntersectAggState &state) {
-		state.data = nullptr;
-	}
-
-	// Same pattern: plain wrapper avoids StateInitialize template resolution issues
 	static void InitWrapper(const AggregateFunction &, data_ptr_t state) {
 		reinterpret_cast<SetIntersectAggState *>(state)->data = nullptr;
 	}
@@ -419,23 +404,20 @@ struct SetIntersectAgg {
 		inputs[0].ToUnifiedFormat(count, idata);
 
 		for (idx_t i = 0; i < count; ++i) {
-			auto idx = idata.sel->get_index(i);
+			// Use selection-vector index for both validity and value lookup.
+			idx_t idx = idata.sel->get_index(i);
 			if (!idata.validity.RowIsValid(idx))
 				continue;
 
 			auto &st = *states[i];
-
-			// Early exit: once intersection is empty it stays empty
 			if (st.data && st.data->empty())
-				continue;
+				continue; // already empty, short-circuit
 
-			auto incoming = read_int_list(inputs[0].GetValue(i)); // safe even with selection vector
+			auto incoming = read_int_list(inputs[0].GetValue(idx));
 
 			if (!st.data) {
-				// First non-null row: seed the state
 				st.data = new std::vector<int32_t>(std::move(incoming));
 			} else {
-				// Subsequent rows: intersect in-place
 				std::vector<int32_t> inter(std::min(st.data->size(), incoming.size()));
 				int32_t n = sorted_set::intersect(st.data->data(), (int32_t)st.data->size(), incoming.data(),
 				                                  (int32_t)incoming.size(), inter.data());
@@ -448,22 +430,16 @@ struct SetIntersectAgg {
 	static void Combine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
 		auto sources = FlatVector::GetData<SetIntersectAggState *>(source_vector);
 		auto targets = FlatVector::GetData<SetIntersectAggState *>(target_vector);
-
 		for (idx_t i = 0; i < count; ++i) {
 			auto &src = *sources[i];
 			auto &tgt = *targets[i];
-
 			if (!src.data)
-				continue; // source saw no rows
-
+				continue;
 			if (!tgt.data) {
-				// Target saw no rows: adopt source's partial result
 				tgt.data = src.data;
 				src.data = nullptr;
 				continue;
 			}
-
-			// Both have partial results: intersect them
 			std::vector<int32_t> inter(std::min(tgt.data->size(), src.data->size()));
 			int32_t n = sorted_set::intersect(tgt.data->data(), (int32_t)tgt.data->size(), src.data->data(),
 			                                  (int32_t)src.data->size(), inter.data());
@@ -477,7 +453,7 @@ struct SetIntersectAgg {
 		for (idx_t i = 0; i < count; ++i) {
 			auto &st = *states[i];
 			if (!st.data)
-				FlatVector::SetNull(result, i + offset, true); // no rows → NULL
+				FlatVector::SetNull(result, i + offset, true);
 			else
 				result.SetValue(i + offset, write_int_list(*st.data));
 		}
@@ -493,20 +469,22 @@ struct SetIntersectAgg {
 
 	static AggregateFunction GetFunction() {
 		AggregateFunction func({LogicalType::LIST(LogicalType::INTEGER)}, LogicalType::LIST(LogicalType::INTEGER),
-		                       AggregateFunction::StateSize<SetIntersectAggState>, // fine as-is
-		                       InitWrapper, // plain wrapper — no StateInitialize template
-		                       Update, Combine, Finalize,
-		                       nullptr, // simple_update
-		                       nullptr, // bind
-		                       Destroy  // signature matches aggregate_destructor_t directly
-		);
+		                       AggregateFunction::StateSize<SetIntersectAggState>, InitWrapper, Update, Combine,
+		                       Finalize, nullptr, nullptr, Destroy);
 		func.name = "set_intersect_agg";
 		return func;
 	}
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// set_search helpers
+// set_search table function
+//
+// Output schema:
+//   positive_ids BIGINT[]  — AND / OR terms, or the AND side of AND_NOT
+//   negative_ids BIGINT[]  — NOT terms for AND_NOT; empty list for AND / OR
+//   op           VARCHAR   — "AND" | "OR" | "AND_NOT"
+//   depth        INTEGER   — total candidates combined
+//
 // ─────────────────────────────────────────────────────────────────────────────
 
 static SearchMode parse_mode(const std::string &s) {
@@ -526,8 +504,13 @@ struct SetSearchBindData : public TableFunctionData {
 
 static unique_ptr<FunctionData> set_search_bind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::LIST(LogicalType::BIGINT), LogicalType::VARCHAR, LogicalType::INTEGER};
-	names = {"result_ids", "op", "depth"};
+	return_types = {
+	    LogicalType::LIST(LogicalType::BIGINT), // positive_ids
+	    LogicalType::LIST(LogicalType::BIGINT), // negative_ids
+	    LogicalType::VARCHAR,                   // op
+	    LogicalType::INTEGER                    // depth
+	};
+	names = {"positive_ids", "negative_ids", "op", "depth"};
 
 	auto result = make_uniq<SetSearchBindData>();
 
@@ -535,19 +518,20 @@ static unique_ptr<FunctionData> set_search_bind(ClientContext &context, TableFun
 	if (target_val.IsNull())
 		return result;
 
+	// Parse and normalise target
 	std::vector<int32_t> target = read_int_list(target_val);
 	if (!target.empty()) {
 		int32_t new_n = sorted_set::normalise(target.data(), (int32_t)target.size(), target.data());
 		target.resize(new_n);
 	}
 
-	// ids
+	// Parse ids
 	const auto &ids_val = input.inputs[1];
 	std::vector<int64_t> ids;
 	for (const auto &v : ListValue::GetChildren(ids_val))
 		ids.push_back(v.GetValue<int64_t>());
 
-	// coverages
+	// Parse and normalise coverages
 	const auto &covs_val = input.inputs[2];
 	std::vector<CoverageEntry> entries;
 	const auto &cov_list = ListValue::GetChildren(covs_val);
@@ -561,14 +545,37 @@ static unique_ptr<FunctionData> set_search_bind(ClientContext &context, TableFun
 		entries.emplace_back(ids[i], std::move(px), bl);
 	}
 
-	// named params (unchanged)
+	// FIX: parse all named parameters 
+	// Named param: blooms (optional precomputed bloom override)
+	auto blooms_it = input.named_parameters.find("blooms");
+	if (blooms_it != input.named_parameters.end() && !blooms_it->second.IsNull()) {
+		const auto &bloom_list = ListValue::GetChildren(blooms_it->second);
+		for (idx_t i = 0; i < bloom_list.size() && i < entries.size(); ++i) {
+			const auto &bv = ListValue::GetChildren(bloom_list[i]);
+			if (bv.size() == 4) {
+				entries[i].bloom = Bloom256(bv[0].GetValue<uint64_t>(), bv[1].GetValue<uint64_t>(),
+				                            bv[2].GetValue<uint64_t>(), bv[3].GetValue<uint64_t>());
+			}
+		}
+	}
+
+	// Named param: mode
 	std::string mode_str = "AUTO";
 	auto mode_it = input.named_parameters.find("mode");
 	if (mode_it != input.named_parameters.end() && !mode_it->second.IsNull())
 		mode_str = mode_it->second.GetValue<string>();
 
-	int32_t max_depth = 5, max_results = 10;
-	// ... (depth_it, res_it, blooms_it as before)
+	// Named param: max_depth
+	int32_t max_depth = 5;
+	auto depth_it = input.named_parameters.find("max_depth");
+	if (depth_it != input.named_parameters.end() && !depth_it->second.IsNull())
+		max_depth = depth_it->second.GetValue<int32_t>();
+
+	// Named param: max_results
+	int32_t max_results = 10;
+	auto res_it = input.named_parameters.find("max_results");
+	if (res_it != input.named_parameters.end() && !res_it->second.IsNull())
+		max_results = res_it->second.GetValue<int32_t>();
 
 	SetSearchEngine engine;
 	result->results = engine.search(target, entries, parse_mode(mode_str), max_depth, max_results);
@@ -586,18 +593,15 @@ static void set_search_function(ClientContext &context, TableFunctionInput &data
 	idx_t count = std::min((idx_t)(data.results.size() - data.offset), (idx_t)STANDARD_VECTOR_SIZE);
 	output.SetCardinality(count);
 
-	auto &ids_col = output.data[0];
-	auto &op_col = output.data[1];
-	auto &dep_col = output.data[2];
+	auto &pos_col = output.data[0]; // positive_ids BIGINT[]
+	auto &neg_col = output.data[1]; // negative_ids BIGINT[]
+	auto &op_col = output.data[2];  // op VARCHAR
+	auto &dep_col = output.data[3]; // depth INTEGER
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &r = data.results[data.offset + i];
-
-		vector<Value> id_vals;
-		for (int64_t id : r.ids)
-			id_vals.push_back(Value::BIGINT(id));
-		ids_col.SetValue(i, Value::LIST(LogicalType::BIGINT, std::move(id_vals)));
-
+		pos_col.SetValue(i, write_bigint_list(r.positive_ids));
+		neg_col.SetValue(i, write_bigint_list(r.negative_ids));
 		op_col.SetValue(i, Value(r.op));
 		dep_col.SetValue(i, Value::INTEGER(r.depth));
 	}
@@ -605,13 +609,16 @@ static void set_search_function(ClientContext &context, TableFunctionInput &data
 	data.offset += count;
 }
 
-static void bloom_of_function(DataChunk &args, ExpressionState &state, Vector &result) {
+// ─────────────────────────────────────────────────────────────────────────────
+// bloom_of scalar function
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void bloom_of_function(DataChunk &args, ExpressionState &, Vector &result) {
 	auto &input = args.data[0];
 	idx_t count = args.size();
 
 	UnifiedVectorFormat input_format;
 	input.ToUnifiedFormat(count, input_format);
-
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	for (idx_t i = 0; i < count; ++i) {
@@ -620,10 +627,8 @@ static void bloom_of_function(DataChunk &args, ExpressionState &state, Vector &r
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
-
 		std::vector<int32_t> pixels = read_int_list(input.GetValue(idx));
 		auto bloom = Bloom256::from_pixels(pixels);
-
 		vector<Value> bloom_vals = {Value::UBIGINT(bloom.w[0]), Value::UBIGINT(bloom.w[1]), Value::UBIGINT(bloom.w[2]),
 		                            Value::UBIGINT(bloom.w[3])};
 		result.SetValue(i, Value::LIST(LogicalType::UBIGINT, std::move(bloom_vals)));
@@ -711,7 +716,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                       {LogicalType::LIST(LogicalType::INTEGER), LogicalType::INTEGER},
 	                                       LogicalType::LIST(LogicalType::INTEGER), set_remove));
 
-	// ── Aggregates ────────────────────────────────────────────────────────────
 	loader.RegisterFunction(SetUnionAgg::GetFunction());
 	loader.RegisterFunction(SetIntersectAgg::GetFunction());
 
@@ -727,19 +731,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	set_search_func.named_parameters["mode"] = LogicalType::VARCHAR;
 	set_search_func.named_parameters["max_depth"] = LogicalType::INTEGER;
 	set_search_func.named_parameters["max_results"] = LogicalType::INTEGER;
-
 	loader.RegisterFunction(set_search_func);
 
 	// ── bloom_of scalar function ──────────────────────────────────────────────
-	ScalarFunction bloom_func("bloom_of", {LogicalType::LIST(LogicalType::INTEGER)},
-	                          LogicalType::LIST(LogicalType::UBIGINT), bloom_of_function);
-	loader.RegisterFunction(bloom_func);
+	loader.RegisterFunction(ScalarFunction("bloom_of", {LogicalType::LIST(LogicalType::INTEGER)},
+	                                       LogicalType::LIST(LogicalType::UBIGINT), bloom_of_function));
 }
 
 void SortedSetExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
-
 std::string SortedSetExtension::Name() {
 	return "sorted_set";
 }

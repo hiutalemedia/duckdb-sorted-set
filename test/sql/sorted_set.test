@@ -5,24 +5,577 @@
 require sorted_set
 
 ###############################################################################
-# bloom_of — scalar utility
+# sorted_set — construction
 ###############################################################################
 
+query I
+SELECT sorted_set([3, 1, 2, 1, 3]::INTEGER[]);
+----
+[1, 2, 3]
+
+query I
+SELECT sorted_set([]::INTEGER[]);
+----
+[]
+
+query I
+SELECT sorted_set([1]::INTEGER[]);
+----
+[1]
+
+# Already sorted and unique — unchanged
+query I
+SELECT sorted_set([1, 2, 3]::INTEGER[]);
+----
+[1, 2, 3]
+
+###############################################################################
+# set_from_range
+###############################################################################
+
+query I
+SELECT set_from_range(1, 5);
+----
+[1, 2, 3, 4, 5]
+
+query I
+SELECT set_from_range(3, 3);
+----
+[3]
+
+query I
+SELECT set_from_range(5, 3);
+----
+[]
+
+###############################################################################
+# set_is_valid
+###############################################################################
+
+query I
+SELECT set_is_valid([1, 2, 3]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_is_valid([3, 1, 2]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_is_valid([1, 1, 2]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_is_valid([]::INTEGER[]);
+----
+true
+
+###############################################################################
+# Predicates
+###############################################################################
+
+query I
+SELECT set_contains([1, 3, 5, 7]::INTEGER[], 3);
+----
+true
+
+query I
+SELECT set_contains([1, 3, 5, 7]::INTEGER[], 4);
+----
+false
+
+query I
+SELECT set_contains([]::INTEGER[], 1);
+----
+false
+
+query I
+SELECT set_equal([1, 2, 3]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_equal([1, 2, 3]::INTEGER[], [1, 2, 4]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_equal([]::INTEGER[], []::INTEGER[]);
+----
+true
+
+query I
+SELECT set_subset_of([1, 2]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_subset_of([1, 4]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_subset_of([]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_superset_of([1, 2, 3]::INTEGER[], [1, 2]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_superset_of([1, 2]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_disjoint([1, 2]::INTEGER[], [3, 4]::INTEGER[]);
+----
+true
+
+query I
+SELECT set_disjoint([1, 2, 3]::INTEGER[], [3, 4]::INTEGER[]);
+----
+false
+
+query I
+SELECT set_disjoint([]::INTEGER[], [1, 2]::INTEGER[]);
+----
+true
+
+# NULL inputs return NULL
+query I
+SELECT set_equal(NULL::INTEGER[], [1, 2]::INTEGER[]);
+----
+NULL
+
+query I
+SELECT set_subset_of(NULL::INTEGER[], [1, 2]::INTEGER[]);
+----
+NULL
+
+###############################################################################
+# Set operations
+###############################################################################
+
+query I
+SELECT set_intersect([1, 2, 3, 4]::INTEGER[], [2, 4, 6]::INTEGER[]);
+----
+[2, 4]
+
+query I
+SELECT set_intersect([1, 2]::INTEGER[], [3, 4]::INTEGER[]);
+----
+[]
+
+query I
+SELECT set_union([1, 3, 5]::INTEGER[], [2, 4, 6]::INTEGER[]);
+----
+[1, 2, 3, 4, 5, 6]
+
+query I
+SELECT set_union([1, 2, 3]::INTEGER[], [2, 3, 4]::INTEGER[]);
+----
+[1, 2, 3, 4]
+
+query I
+SELECT set_subtract([1, 2, 3, 4]::INTEGER[], [2, 4]::INTEGER[]);
+----
+[1, 3]
+
+query I
+SELECT set_subtract([1, 2, 3]::INTEGER[], [4, 5]::INTEGER[]);
+----
+[1, 2, 3]
+
+query I
+SELECT set_subtract([1, 2]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+[]
+
+query I
+SELECT set_symmetric_diff([1, 2, 3]::INTEGER[], [2, 3, 4]::INTEGER[]);
+----
+[1, 4]
+
+query I
+SELECT set_symmetric_diff([1, 2]::INTEGER[], [3, 4]::INTEGER[]);
+----
+[1, 2, 3, 4]
+
+query I
+SELECT set_symmetric_diff([1, 2, 3]::INTEGER[], [1, 2, 3]::INTEGER[]);
+----
+[]
+
+# Results are valid sorted sets
+query I
+SELECT set_is_valid(set_union([1,3,5]::INTEGER[], [2,4,6]::INTEGER[]));
+----
+true
+
+query I
+SELECT set_is_valid(set_intersect([1,2,3]::INTEGER[], [2,3,4]::INTEGER[]));
+----
+true
+
+###############################################################################
+# Scalar accessors
+###############################################################################
+
+query I
+SELECT set_size([1, 2, 3, 4]::INTEGER[]);
+----
+4
+
+query I
+SELECT set_size([]::INTEGER[]);
+----
+0
+
+# set_min / set_max — O(1) because array is sorted.
+# Input must be a valid sorted set; pass unsorted data through sorted_set() first.
+query I
+SELECT set_min([1, 3, 7, 9]::INTEGER[]);
+----
+1
+
+query I
+SELECT set_max([1, 3, 7, 9]::INTEGER[]);
+----
+9
+
+query I
+SELECT set_min([]::INTEGER[]);
+----
+NULL
+
+query I
+SELECT set_max([]::INTEGER[]);
+----
+NULL
+
+query I
+SELECT set_intersect_size([1, 2, 3, 4]::INTEGER[], [2, 4, 6]::INTEGER[]);
+----
+2
+
+query I
+SELECT set_intersect_size([1, 2]::INTEGER[], [3, 4]::INTEGER[]);
+----
+0
+
+# set_rank — zero-based position, -1 if absent
+query I
+SELECT set_rank([10, 20, 30, 40]::INTEGER[], 20);
+----
+1
+
+query I
+SELECT set_rank([10, 20, 30, 40]::INTEGER[], 25);
+----
+-1
+
+query I
+SELECT set_rank([10, 20, 30, 40]::INTEGER[], 10);
+----
+0
+
+# set_at — element at zero-based rank
+query I
+SELECT set_at([10, 20, 30, 40]::INTEGER[], 2);
+----
+30
+
+query I
+SELECT set_at([10, 20, 30, 40]::INTEGER[], 0);
+----
+10
+
+query I
+SELECT set_at([10, 20, 30, 40]::INTEGER[], 99);
+----
+NULL
+
+query I
+SELECT set_at([10, 20, 30, 40]::INTEGER[], -1);
+----
+NULL
+
+###############################################################################
+# Mutation
+###############################################################################
+
+query I
+SELECT set_add([1, 3, 5]::INTEGER[], 4);
+----
+[1, 3, 4, 5]
+
+# No-op if already present
+query I
+SELECT set_add([1, 3, 5]::INTEGER[], 3);
+----
+[1, 3, 5]
+
+query I
+SELECT set_add([]::INTEGER[], 7);
+----
+[7]
+
+query I
+SELECT set_remove([1, 2, 3, 4]::INTEGER[], 3);
+----
+[1, 2, 4]
+
+# No-op if absent
+query I
+SELECT set_remove([1, 2, 3]::INTEGER[], 99);
+----
+[1, 2, 3]
+
+query I
+SELECT set_remove([]::INTEGER[], 1);
+----
+[]
+
+###############################################################################
+# set_union_agg
+###############################################################################
+
+query I
+SELECT set_union_agg(px) FROM (VALUES
+    ([1, 3, 5]::INTEGER[]),
+    ([2, 4, 6]::INTEGER[]),
+    ([3, 5, 7]::INTEGER[])
+) t(px);
+----
+[1, 2, 3, 4, 5, 6, 7]
+
+# Single row
+query I
+SELECT set_union_agg(px) FROM (VALUES ([1, 2, 3]::INTEGER[])) t(px);
+----
+[1, 2, 3]
+
+# NULL rows are skipped
+query I
+SELECT set_union_agg(px) FROM (VALUES
+    ([1, 2]::INTEGER[]),
+    (NULL::INTEGER[]),
+    ([3, 4]::INTEGER[])
+) t(px);
+----
+[1, 2, 3, 4]
+
+# All NULL → NULL
+query I
+SELECT set_union_agg(px) FROM (VALUES (NULL::INTEGER[]), (NULL::INTEGER[])) t(px);
+----
+NULL
+
+# Empty group → NULL
+query I
+SELECT set_union_agg(px) FROM (VALUES ([1]::INTEGER[])) t(px) WHERE false;
+----
+NULL
+
+# GROUP BY — union within each group
+query II rowsort
+SELECT grp, set_union_agg(px) FROM (VALUES
+    (1, [1, 2]::INTEGER[]),
+    (1, [2, 3]::INTEGER[]),
+    (2, [10, 11]::INTEGER[]),
+    (2, [11, 12]::INTEGER[])
+) t(grp, px)
+GROUP BY grp;
+----
+1	[1, 2, 3]
+2	[10, 11, 12]
+
+# Result is a valid sorted set
+query I
+SELECT set_is_valid(set_union_agg(px)) FROM (VALUES
+    ([1, 2, 3]::INTEGER[]),
+    ([4, 5]::INTEGER[])
+) t(px);
+----
+true
+
+###############################################################################
+# set_intersect_agg
+###############################################################################
+
+query I
+SELECT set_intersect_agg(px) FROM (VALUES
+    ([1, 2, 3, 4]::INTEGER[]),
+    ([2, 3, 4, 5]::INTEGER[]),
+    ([3, 4, 5, 6]::INTEGER[])
+) t(px);
+----
+[3, 4]
+
+# Single row — returns that row unchanged
+query I
+SELECT set_intersect_agg(px) FROM (VALUES ([1, 2, 3]::INTEGER[])) t(px);
+----
+[1, 2, 3]
+
+# Disjoint sets — empty list, not NULL
+query I
+SELECT set_intersect_agg(px) FROM (VALUES
+    ([1, 2]::INTEGER[]),
+    ([3, 4]::INTEGER[])
+) t(px);
+----
+[]
+
+# NULL rows are skipped — don't contribute to intersection
+query I
+SELECT set_intersect_agg(px) FROM (VALUES
+    ([1, 2, 3]::INTEGER[]),
+    (NULL::INTEGER[]),
+    ([2, 3, 4]::INTEGER[])
+) t(px);
+----
+[2, 3]
+
+# All NULL → NULL
+query I
+SELECT set_intersect_agg(px) FROM (VALUES (NULL::INTEGER[]), (NULL::INTEGER[])) t(px);
+----
+NULL
+
+# Empty group → NULL
+query I
+SELECT set_intersect_agg(px) FROM (VALUES ([1]::INTEGER[])) t(px) WHERE false;
+----
+NULL
+
+# GROUP BY — intersection within each group
+query II rowsort
+SELECT grp, set_intersect_agg(px) FROM (VALUES
+    (1, [1, 2, 3]::INTEGER[]),
+    (1, [2, 3, 4]::INTEGER[]),
+    (2, [10, 11, 12]::INTEGER[]),
+    (2, [11, 12, 13]::INTEGER[])
+) t(grp, px)
+GROUP BY grp;
+----
+1	[2, 3]
+2	[11, 12]
+
+# Result is a valid sorted set
+query I
+SELECT set_is_valid(set_intersect_agg(px)) FROM (VALUES
+    ([1, 2, 3, 4]::INTEGER[]),
+    ([2, 3, 4, 5]::INTEGER[])
+) t(px);
+----
+true
+
+###############################################################################
+# Composability with standard SQL
+###############################################################################
+
+# Works inside CTEs
+query I
+WITH
+a AS (SELECT sorted_set([5, 3, 1, 3]::INTEGER[]) AS s),
+b AS (SELECT sorted_set([2, 4, 3]::INTEGER[])    AS s)
+SELECT set_union(a.s, b.s) FROM a, b;
+----
+[1, 2, 3, 4, 5]
+
+# Works in WHERE clause
+query I
+SELECT count(*) FROM (
+    SELECT * FROM (VALUES
+        ([1, 2, 3]::INTEGER[]),
+        ([1, 4, 5]::INTEGER[]),
+        ([2, 3, 6]::INTEGER[])
+    ) t(px)
+    WHERE set_contains(px, 3)
+);
+----
+2
+
+# set_intersect_size in WHERE — common superset query pattern
+statement ok
+CREATE TEMP TABLE coverage (feat_id INTEGER, px INTEGER[]);
+
+statement ok
+INSERT INTO coverage VALUES
+    (1, [0, 1, 2, 3, 4, 5]),
+    (2, [0, 1, 2, 9, 10]),
+    (3, [3, 4, 5, 6, 7]),
+    (4, [0, 1, 2, 3, 4, 5, 6]);
+
+query I rowsort
+SELECT feat_id FROM coverage
+WHERE set_subset_of([0, 1, 2, 3]::INTEGER[], px);
+----
+1
+4
+
+query I
+SELECT feat_id FROM coverage
+WHERE set_equal(px, [0, 1, 2, 3, 4, 5]::INTEGER[]);
+----
+1
+
+query II rowsort
+SELECT feat_id, set_intersect_size(px, [0, 1, 2]::INTEGER[]) AS overlap
+FROM coverage
+WHERE set_intersect_size(px, [0, 1, 2]::INTEGER[]) >= 2;
+----
+1	3
+2	3
+4	3
+
+# BFS-style: carry intersection through a join
+query I rowsort
+WITH
+target AS (SELECT [0, 1, 2, 3, 4, 5]::INTEGER[] AS s),
+step1 AS (
+    SELECT c.feat_id, set_intersect(c.px, t.s) AS inter
+    FROM coverage c, target t
+    WHERE set_subset_of(t.s, c.px)
+)
+SELECT feat_id FROM step1
+WHERE set_equal(inter, (SELECT s FROM target));
+----
+1
+4
+
+statement ok
+DROP TABLE coverage;
+
+###############################################################################
+# bloom_of
+###############################################################################
+
+# Returns exactly 4 words
 query I
 SELECT array_length(bloom_of([0, 1, 4, 5]::INTEGER[]));
 ----
 4
 
+# Empty array — all words zero
 query I
 SELECT bloom_of([]::INTEGER[]) = [0::UBIGINT, 0::UBIGINT, 0::UBIGINT, 0::UBIGINT];
 ----
 true
 
+# Deterministic
 query I
 SELECT bloom_of([1, 2, 3]::INTEGER[]) = bloom_of([1, 2, 3]::INTEGER[]);
 ----
 true
 
+# Order-independent (extension sorts internally)
 query I
 SELECT bloom_of([3, 1, 2]::INTEGER[]) = bloom_of([1, 2, 3]::INTEGER[]);
 ----
@@ -32,377 +585,377 @@ true
 # set_search — AND mode
 ###############################################################################
 
-query TTI
-SELECT result_ids, op, depth
-FROM set_search([0, 1, 4, 5], [1, 2, 3], [[0, 1, 4, 5], [0, 1, 4, 5, 9], [6, 7, 8]], mode := 'AND');
+# Depth-1 exact match
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [0, 1, 4, 5]::INTEGER[],
+    [1, 2, 3]::BIGINT[],
+    [[0, 1, 4, 5], [0, 1, 4, 5, 9], [6, 7, 8]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
-[1]	AND	1
+[1]	[]	AND	1
 
-query TTI
-SELECT result_ids, op, depth
-FROM set_search([2, 3], [10, 20], [[1, 2, 3], [2, 3, 4]], mode := 'AND');
+# Depth-2 intersection
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [2, 3]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2, 3], [2, 3, 4]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
-[10, 20]	AND	2
+[10, 20]	[]	AND	2
 
-query TTI
-SELECT result_ids, op, depth
-FROM set_search([99], [10, 20], [[1, 2], [3, 4]], mode := 'AND');
+# No solution — no candidate is a superset of target
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [99]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2], [3, 4]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
 
+# AND deduplicates by coverage fingerprint: three candidates with identical
+# coverage collapse to one result regardless of max_results.
 query I
-SELECT count(*) FROM set_search([1], [10,20,30], [[1],[1],[1]], mode := 'AND', max_results := 2);
+SELECT count(*)
+FROM set_search(
+    [1]::INTEGER[],
+    [10, 20, 30]::BIGINT[],
+    [[1], [1], [1]]::INTEGER[][],
+    mode := 'AND',
+    max_results := 2
+);
 ----
 1
+
+# max_depth := 1 finds only exact single-candidate matches
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [2, 3]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2, 3], [2, 3, 4]]::INTEGER[][],
+    mode := 'AND',
+    max_depth := 1
+);
+----
+
+###############################################################################
+# set_search — OR mode
+###############################################################################
+
+# Depth-2 union of disjoint candidates
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 2, 3, 4]::INTEGER[],
+    [10, 20, 30]::BIGINT[],
+    [[1, 2], [3, 4], [99]]::INTEGER[][],
+    mode := 'OR'
+);
+----
+[10, 20]	[]	OR	2
+
+# Depth-1 exact match
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [5, 6]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[5, 6], [5, 6, 7]]::INTEGER[][],
+    mode := 'OR'
+);
+----
+[10]	[]	OR	1
+
+# Candidate that is not a subset of target is excluded
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 2]::INTEGER[],
+    [10]::BIGINT[],
+    [[1, 2, 3]]::INTEGER[][],
+    mode := 'OR'
+);
+----
 
 ###############################################################################
 # set_search — AND_NOT mode
 ###############################################################################
 
+# positive_ids = AND terms, negative_ids = NOT terms (both plain positive BIGINTs)
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 2, 3]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2, 3, 4], [4]]::INTEGER[][],
+    mode := 'AND_NOT'
+);
+----
+[10]	[20]	AND_NOT	2
+
+# AND_NOT falls back to plain AND when an exact match exists
+query T
+SELECT op
+FROM set_search(
+    [1, 2, 3]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2, 3], [4]]::INTEGER[][],
+    mode := 'AND_NOT'
+);
+----
+AND
+
+# max_results limits AND_NOT output.
+# A=[1,2,5,7] and B=[1,2,6,7] share element 7 so A∩B=[1,2,7] != target [1,2].
+# AND finds no solution. AND_NOT finds two distinct pairs:
+#   A \ [5,7] = [1,2]  and  B \ [6,7] = [1,2].
 query I
 SELECT count(*)
-FROM set_search([1, 2], [10,20,30,40], [[1,2,5,7],[1,2,6,7],[5,7],[6,7]], mode := 'AND_NOT', max_results := 1);
+FROM set_search(
+    [1, 2]::INTEGER[],
+    [10, 20, 30, 40]::BIGINT[],
+    [[1, 2, 5, 7], [1, 2, 6, 7], [5, 7], [6, 7]]::INTEGER[][],
+    mode := 'AND_NOT',
+    max_results := 1
+);
 ----
-2
+1
 
 query I
 SELECT count(*)
-FROM set_search([1, 2], [10,20,30,40], [[1,2,5,7],[1,2,6,7],[5,7],[6,7]], mode := 'AND_NOT', max_results := 10);
+FROM set_search(
+    [1, 2]::INTEGER[],
+    [10, 20, 30, 40]::BIGINT[],
+    [[1, 2, 5, 7], [1, 2, 6, 7], [5, 7], [6, 7]]::INTEGER[][],
+    mode := 'AND_NOT',
+    max_results := 10
+);
 ----
 2
+
+# Negative IDs are handled correctly in both positive and NOT columns.
+# neg.id = -99 (a negative candidate ID). Old sign-encoding (-neg.id = 99)
+# would have been indistinguishable from a positive AND term. Now it is stored
+# as-is in negative_ids.
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 2, 3]::INTEGER[],
+    [10, -99]::BIGINT[],
+    [[1, 2, 3, 4], [4]]::INTEGER[][],
+    mode := 'AND_NOT'
+);
+----
+[10]	[-99]	AND_NOT	2
 
 ###############################################################################
-# set_search — OR, AUTO, edge cases, etc.
+# set_search — AUTO mode
 ###############################################################################
 
-# ... (keep the rest of your OR, AND_NOT, AUTO, bloom pruning, and edge cases as they are)
-
-# ── sorted_set core functionality ───────────────────────────────────────────
-
-# Construction
-query I
-SELECT sorted_set([3, 1, 2, 1, 3]::INTEGER[])
+# AND match found first
+query T
+SELECT op
+FROM set_search(
+    [1, 2]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2], [1, 2, 3]]::INTEGER[][],
+    mode := 'AUTO'
+);
 ----
-[1, 2, 3]
+AND
 
-# set_min / set_max (must be sorted)
-query I
-SELECT set_min(sorted_set([3, 7, 1, 9]::INTEGER[]))
+# AND fails, AND_NOT succeeds
+query T
+SELECT op
+FROM set_search(
+    [1, 2, 3]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2, 3, 4], [4]]::INTEGER[][],
+    mode := 'AUTO'
+);
 ----
-1
+AND_NOT
 
-query I
-SELECT set_max(sorted_set([3, 7, 1, 9]::INTEGER[]))
+# AND and AND_NOT both fail, OR succeeds
+query T
+SELECT op
+FROM set_search(
+    [1, 2, 3, 4]::INTEGER[],
+    [10, 20]::BIGINT[],
+    [[1, 2], [3, 4]]::INTEGER[][],
+    mode := 'AUTO'
+);
 ----
-9
+OR
 
-# set_intersect_size — without materialising the intersection
-query I
-SELECT set_intersect_size([1, 2, 3, 4]::INTEGER[], [2, 4, 6]::INTEGER[])
+###############################################################################
+# set_search — precomputed blooms
+###############################################################################
+
+# Precomputed blooms give identical results to self-computed blooms (depth-1)
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [0, 1, 4, 5]::INTEGER[],
+    [1, 2, 3]::BIGINT[],
+    [[0, 1, 4, 5], [0, 1, 4, 5, 9], [6, 7, 8]]::INTEGER[][],
+    blooms := [
+        bloom_of([0, 1, 4, 5]::INTEGER[]),
+        bloom_of([0, 1, 4, 5, 9]::INTEGER[]),
+        bloom_of([6, 7, 8]::INTEGER[])
+    ],
+    mode := 'AND'
+);
 ----
-2
+[1]	[]	AND	1
 
-query I
-SELECT set_intersect_size([1, 2]::INTEGER[], [3, 4]::INTEGER[])
+# Bloom pruning equivalence on a larger candidate set.
+# 10 candidates; only candidate 5 covers the target. The other 9 are disjoint
+# so the bloom filter does real work. Self-computed and precomputed blooms must
+# produce identical results — a hash mismatch would cause one run to miss
+# candidate 5 or return a wrong result.
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [10, 20, 30]::INTEGER[],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]::BIGINT[],
+    [
+        [1,  2],
+        [3,  4],
+        [5,  6],
+        [7,  8],
+        [10, 20, 30],
+        [11, 12],
+        [13, 14],
+        [15, 16],
+        [17, 18],
+        [19, 21]
+    ]::INTEGER[][],
+    mode := 'AND'
+);
 ----
-0
+[5]	[]	AND	1
 
-# set_rank — 0-based position in sorted set
-query I
-SELECT set_rank([10, 20, 30, 40]::INTEGER[], 20)
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [10, 20, 30]::INTEGER[],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]::BIGINT[],
+    [
+        [1,  2],
+        [3,  4],
+        [5,  6],
+        [7,  8],
+        [10, 20, 30],
+        [11, 12],
+        [13, 14],
+        [15, 16],
+        [17, 18],
+        [19, 21]
+    ]::INTEGER[][],
+    blooms := [
+        bloom_of([1,  2]::INTEGER[]),
+        bloom_of([3,  4]::INTEGER[]),
+        bloom_of([5,  6]::INTEGER[]),
+        bloom_of([7,  8]::INTEGER[]),
+        bloom_of([10, 20, 30]::INTEGER[]),
+        bloom_of([11, 12]::INTEGER[]),
+        bloom_of([13, 14]::INTEGER[]),
+        bloom_of([15, 16]::INTEGER[]),
+        bloom_of([17, 18]::INTEGER[]),
+        bloom_of([19, 21]::INTEGER[])
+    ],
+    mode := 'AND'
+);
 ----
-1
+[5]	[]	AND	1
 
-query I
-SELECT set_rank([10, 20, 30, 40]::INTEGER[], 25)
+###############################################################################
+# set_search — edge cases
+###############################################################################
+
+# NULL target returns no rows
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    NULL::INTEGER[],
+    [1]::BIGINT[],
+    [[1, 2]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
--1
 
-# set_at — element at 0-based rank
-query I
-SELECT set_at([10, 20, 30, 40]::INTEGER[], 2)
+# Duplicate values in target are deduplicated
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 1, 2, 2]::INTEGER[],
+    [10]::BIGINT[],
+    [[1, 2]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
-30
+[10]	[]	AND	1
 
-query I
-SELECT set_at([10, 20, 30, 40]::INTEGER[], 99)
+# Unsorted coverage arrays are sorted internally
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [1, 2, 3]::INTEGER[],
+    [10]::BIGINT[],
+    [[3, 1, 2]]::INTEGER[][],
+    mode := 'AND'
+);
 ----
-NULL
+[10]	[]	AND	1
 
-
-# ── Mutation ──────────────────────────────────────────────────────────────────
-
-# set_add — inserts in sorted position, no-op if present
-query I
-SELECT set_add([1, 3, 5]::INTEGER[], 4)
-----
-[1, 3, 4, 5]
-
-query I
-SELECT set_add([1, 3, 5]::INTEGER[], 3)
-----
-[1, 3, 5]
-
-query I
-SELECT set_add([]::INTEGER[], 7)
-----
-[7]
-
-# set_remove — removes element, no-op if absent
-query I
-SELECT set_remove([1, 2, 3, 4]::INTEGER[], 3)
-----
-[1, 2, 4]
-
-query I
-SELECT set_remove([1, 2, 3]::INTEGER[], 99)
-----
-[1, 2, 3]
-
-
-# ── Composability with standard SQL ──────────────────────────────────────────
-
-# Works inside CTEs
-query I
-WITH
-a AS (SELECT sorted_set([5,3,1,3]::INTEGER[]) AS s),
-b AS (SELECT sorted_set([2,4,3]::INTEGER[])   AS s)
-SELECT set_union(a.s, b.s) FROM a, b
-----
-[1, 2, 3, 4, 5]
-
-# Works in WHERE clause
-query I
-SELECT count(*) FROM (
-    SELECT * FROM (VALUES
-        ([1,2,3]::INTEGER[]),
-        ([1,4,5]::INTEGER[]),
-        ([2,3,6]::INTEGER[])
-    ) t(px)
-    WHERE set_contains(px, 3)
-)
-----
-2
-
-# set_intersect_size in HAVING — common pattern for superset queries
+# bloom_of works in DML — values stored correctly and match at query time
 statement ok
-CREATE TEMP TABLE coverage (feat_id INTEGER, px INTEGER[]);
+CREATE TEMP TABLE cov (feat_id BIGINT, px INTEGER[], bloom UBIGINT[4]);
 
 statement ok
-INSERT INTO coverage VALUES
-    (1, [0,1,2,3,4,5]),
-    (2, [0,1,2,9,10]),
-    (3, [3,4,5,6,7]),
-    (4, [0,1,2,3,4,5,6]);
+INSERT INTO cov VALUES
+    (1, [0, 1, 4, 5],    bloom_of([0, 1, 4, 5]::INTEGER[])),
+    (2, [0, 1, 4, 5, 9], bloom_of([0, 1, 4, 5, 9]::INTEGER[])),
+    (3, [6, 7, 8],       bloom_of([6, 7, 8]::INTEGER[]));
 
-# Which features are supersets of [0,1,2,3]?
-query I rowsort
-SELECT feat_id FROM coverage
-WHERE set_subset_of([0,1,2,3]::INTEGER[], px)
+query I
+SELECT array_length(bloom) FROM cov WHERE feat_id = 1;
 ----
-1
 4
 
-# Which feature exactly covers [0,1,2,3,4,5]?
 query I
-SELECT feat_id FROM coverage
-WHERE set_equal(px, [0,1,2,3,4,5]::INTEGER[])
-----
-1
-
-# Intersection size for HAVING clause usage
-query II rowsort
-SELECT feat_id, set_intersect_size(px, [0,1,2]::INTEGER[]) AS overlap
-FROM coverage
-WHERE set_intersect_size(px, [0,1,2]::INTEGER[]) >= 2
-----
-1	3
-2	3
-4	3
-
-# BFS-style: carry intersection through a join
-query I
-WITH
-target AS (SELECT [0,1,2,3,4,5]::INTEGER[] AS s),
-step1  AS (
-    SELECT c.feat_id, set_intersect(c.px, t.s) AS inter
-    FROM coverage c, target t
-    WHERE set_subset_of(t.s, c.px)
-)
-SELECT feat_id FROM step1 WHERE set_equal(inter, (SELECT s FROM target))
-----
-1
-4
-
-
-# ── set_union_agg ─────────────────────────────────────────────────────────────
-
-# Basic union across rows
-query I
-SELECT set_union_agg(px) FROM (VALUES
-    ([1,3,5]::INTEGER[]),
-    ([2,4,6]::INTEGER[]),
-    ([3,5,7]::INTEGER[])
-) t(px)
-----
-[1, 2, 3, 4, 5, 6, 7]
-
-# Single row
-query I
-SELECT set_union_agg(px) FROM (VALUES ([1,2,3]::INTEGER[])) t(px)
-----
-[1, 2, 3]
-
-# NULL rows are skipped
-query I
-SELECT set_union_agg(px) FROM (VALUES
-    ([1,2]::INTEGER[]),
-    (NULL::INTEGER[]),
-    ([3,4]::INTEGER[])
-) t(px)
-----
-[1, 2, 3, 4]
-
-# All NULL → NULL
-query I
-SELECT set_union_agg(px) FROM (VALUES (NULL::INTEGER[]), (NULL::INTEGER[])) t(px)
-----
-NULL
-
-# Empty group → NULL
-query I
-SELECT set_union_agg(px) FROM (VALUES ([1]::INTEGER[])) t(px) WHERE false
-----
-NULL
-
-# GROUP BY — union within each group
-query II rowsort
-SELECT grp, set_union_agg(px) FROM (VALUES
-    (1, [1,2]::INTEGER[]),
-    (1, [2,3]::INTEGER[]),
-    (2, [10,11]::INTEGER[]),
-    (2, [11,12]::INTEGER[])
-) t(grp, px)
-GROUP BY grp
-----
-1	[1, 2, 3]
-2	[10, 11, 12]
-
-# Result is a valid sorted set (no duplicates, sorted)
-query I
-SELECT set_is_valid(set_union_agg(px)) FROM (VALUES
-    ([1,2,3]::INTEGER[]),
-    ([4,5]::INTEGER[])
-) t(px)
+SELECT bloom = bloom_of(px) FROM cov WHERE feat_id = 1;
 ----
 true
 
-# Coverage check: union of all features covers their individual members
-query I
-SELECT set_superset_of(
-    set_union_agg(px),
-    sorted_set([1,2,3,4,5,6]::INTEGER[])
-) FROM (VALUES
-    ([1,2,3]::INTEGER[]),
-    ([4,5,6]::INTEGER[])
-) t(px)
+statement ok
+DROP TABLE cov;
+
+###############################################################################
+# Known limitation: AND_NOT only supports depth-1 positive candidates.
+#
+# The only solution here is (candidate 10 ∩ candidate 20) \ candidate 30 = [3],
+# requiring a depth-2 positive chain before negation. The engine does not find
+# it. This test documents the gap — if search_and_not is later extended to
+# support deeper positive chains, this query will start returning a row and the
+# test will fail, signalling that both the code and this comment need updating.
+###############################################################################
+
+query TTTI
+SELECT positive_ids, negative_ids, op, depth
+FROM set_search(
+    [3]::INTEGER[],
+    [10, 20, 30]::BIGINT[],
+    [[1, 2, 3], [2, 3, 4], [2]]::INTEGER[][],
+    mode := 'AND_NOT'
+);
 ----
-true
-
-
-# ── set_intersect_agg ─────────────────────────────────────────────────────────
-
-# Basic intersection across rows — common elements only
-query I
-SELECT set_intersect_agg(px) FROM (VALUES
-    ([1,2,3,4]::INTEGER[]),
-    ([2,3,4,5]::INTEGER[]),
-    ([3,4,5,6]::INTEGER[])
-) t(px)
-----
-[3, 4]
-
-# Single row — returns that row's set
-query I
-SELECT set_intersect_agg(px) FROM (VALUES ([1,2,3]::INTEGER[])) t(px)
-----
-[1, 2, 3]
-
-# Disjoint sets — intersection is empty (not NULL)
-query I
-SELECT set_intersect_agg(px) FROM (VALUES
-    ([1,2]::INTEGER[]),
-    ([3,4]::INTEGER[])
-) t(px)
-----
-[]
-
-# NULL rows are skipped (don't contribute to intersection)
-# Without NULLs: {1,2,3} ∩ {2,3,4} = {2,3}
-query I
-SELECT set_intersect_agg(px) FROM (VALUES
-    ([1,2,3]::INTEGER[]),
-    (NULL::INTEGER[]),
-    ([2,3,4]::INTEGER[])
-) t(px)
-----
-[2, 3]
-
-# All NULL → NULL (no rows contributed)
-query I
-SELECT set_intersect_agg(px) FROM (VALUES (NULL::INTEGER[]), (NULL::INTEGER[])) t(px)
-----
-NULL
-
-# Empty group → NULL
-query I
-SELECT set_intersect_agg(px) FROM (VALUES ([1]::INTEGER[])) t(px) WHERE false
-----
-NULL
-
-# GROUP BY — intersection within each group
-query II rowsort
-SELECT grp, set_intersect_agg(px) FROM (VALUES
-    (1, [1,2,3]::INTEGER[]),
-    (1, [2,3,4]::INTEGER[]),
-    (2, [10,11,12]::INTEGER[]),
-    (2, [11,12,13]::INTEGER[])
-) t(grp, px)
-GROUP BY grp
-----
-1	[2, 3]
-2	[11, 12]
-
-# Result is a valid sorted set
-query I
-SELECT set_is_valid(set_intersect_agg(px)) FROM (VALUES
-    ([1,2,3,4]::INTEGER[]),
-    ([2,3,4,5]::INTEGER[])
-) t(px)
-----
-true
-
-# Intersection is subset of every input
-query I
-WITH agg AS (
-    SELECT set_intersect_agg(px) AS inter FROM (VALUES
-        ([1,2,3]::INTEGER[]),
-        ([2,3,4]::INTEGER[]),
-        ([3,4,5]::INTEGER[])
-    ) t(px)
-)
-SELECT set_subset_of(inter, [1,2,3]::INTEGER[])
-    AND set_subset_of(inter, [2,3,4]::INTEGER[])
-    AND set_subset_of(inter, [3,4,5]::INTEGER[])
-FROM agg
-----
-true
-
-# Combined: union then intersect
-# union({1,2},{3,4}) = {1,2,3,4}; intersect with {2,3} = {2,3}
-query I
-SELECT set_intersect(
-    set_union_agg(px),
-    [2,3]::INTEGER[]
-) FROM (VALUES ([1,2]::INTEGER[]), ([3,4]::INTEGER[])) t(px)
-----
-[2, 3]

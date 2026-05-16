@@ -12,10 +12,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include)
 
-# ←←← ADD ALL YOUR SOURCE FILES HERE
 set(EXTENSION_SOURCES
     src/sorted_set_extension.cpp
-    src/set_search_core.cpp  
+    src/set_search_core.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

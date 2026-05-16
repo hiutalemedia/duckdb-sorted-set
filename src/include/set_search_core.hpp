@@ -26,9 +26,6 @@ struct Bloom256 {
 	Bloom256(uint64_t a, uint64_t b, uint64_t c, uint64_t d) : w {a, b, c, d} {
 	}
 
-	// Compute from a sorted pixel list using xxhash-style mixing per pixel ID.
-	// The caller can optionally supply precomputed blooms from a salt table;
-	// this path is used when no salt is provided (self-contained mode).
 	static Bloom256 from_pixels(const std::vector<int32_t> &pixels);
 
 	bool is_superset_of(const Bloom256 &sub) const {
@@ -50,7 +47,6 @@ struct Bloom256 {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CoverageEntry — one row in the candidate set.
-// Pixels must be a SORTED list of non-negative integers.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct CoverageEntry {
@@ -65,19 +61,23 @@ struct CoverageEntry {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SearchResult — one found combination.
+//
+// AND_NOT encoding: positive_ids are the AND terms, negative_ids are the NOT
+// terms. Both are plain positive BIGINT values. This avoids the sign-bit
+// convention (-neg.id) which is broken when input IDs are themselves negative.
+// For AND and OR results, negative_ids is always empty.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct SearchResult {
-	std::vector<int64_t> ids; // IDs of the combined entries
-	std::string op;           // "AND" | "AND_NOT" | "OR"
-	int32_t depth;            // number of entries combined
+	std::vector<int64_t> positive_ids; // AND / OR / AND_NOT positive terms
+	std::vector<int64_t> negative_ids; // AND_NOT NOT terms (empty for AND/OR)
+	std::string op;                    // "AND" | "AND_NOT" | "OR"
+	int32_t depth;                     // total candidates combined
 
-	// Explicit constructor required for C++11 — the DuckDB build system
-	// enforces -std=c++11 at link time regardless of CMakeLists settings,
-	// so aggregate brace-init of structs containing std::string/std::vector
-	// does not compile without it.
-	SearchResult(std::vector<int64_t> ids_, std::string op_, int32_t depth_)
-	    : ids(std::move(ids_)), op(std::move(op_)), depth(depth_) {
+	// Explicit constructor required for C++11 compatibility — DuckDB's build
+	// system enforces -std=c++11 regardless of CMakeLists settings.
+	SearchResult(std::vector<int64_t> pos, std::vector<int64_t> neg, std::string op_, int32_t depth_)
+	    : positive_ids(std::move(pos)), negative_ids(std::move(neg)), op(std::move(op_)), depth(depth_) {
 	}
 };
 
@@ -90,74 +90,53 @@ enum class SearchMode { AND, AND_NOT, OR, AUTO };
 // ─────────────────────────────────────────────────────────────────────────────
 // SetSearchEngine — the core BFS engine.
 //
-// Design decisions:
-//   - Pure C++ with no DuckDB dependencies. Can be unit-tested independently.
-//   - Coverage arrays must be sorted on input; sorted order maintained throughout.
-//   - Deduplication via 64-bit fingerprint of the coverage array (FNV-1a on bytes).
-//     Collision probability negligible for typical ARC problem sizes.
-//   - Bloom pre-filter runs before every array operation.
-//   - max_results controls early termination; default 10 for efficiency.
+// Pure C++ with no DuckDB dependencies. Can be unit-tested independently.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class SetSearchEngine {
 public:
 	SetSearchEngine() = default;
 
-	// Run search. Returns up to max_results combinations.
 	std::vector<SearchResult> search(const std::vector<int32_t> &target, const std::vector<CoverageEntry> &candidates,
 	                                 SearchMode mode = SearchMode::AUTO, int32_t max_depth = 5,
 	                                 int32_t max_results = 10);
 
 private:
-	// AND: find combinations whose intersection = target
 	std::vector<SearchResult> search_and(const std::vector<int32_t> &target, const Bloom256 &target_bloom,
 	                                     const std::vector<CoverageEntry> &candidates, int32_t max_depth,
 	                                     int32_t max_results);
 
-	// OR: find combinations whose union = target
 	std::vector<SearchResult> search_or(const std::vector<int32_t> &target, const Bloom256 &target_bloom,
 	                                    const std::vector<CoverageEntry> &candidates, int32_t max_depth,
 	                                    int32_t max_results);
 
-	// AND_NOT: find (P1 ∩ P2 ∩ ...) \ N = target
 	std::vector<SearchResult> search_and_not(const std::vector<int32_t> &target, const Bloom256 &target_bloom,
 	                                         const std::vector<CoverageEntry> &candidates, int32_t max_depth,
 	                                         int32_t max_results);
 
-	// ── Sorted array primitives ──────────────────────────────────────────
 	static std::vector<int32_t> intersect(const std::vector<int32_t> &a, const std::vector<int32_t> &b);
-
 	static std::vector<int32_t> union_(const std::vector<int32_t> &a, const std::vector<int32_t> &b);
-
 	static std::vector<int32_t> subtract(const std::vector<int32_t> &a, const std::vector<int32_t> &b);
-
 	static bool is_subset(const std::vector<int32_t> &sub, const std::vector<int32_t> &sup);
-
 	static bool arrays_equal(const std::vector<int32_t> &a, const std::vector<int32_t> &b);
-
-	// 64-bit fingerprint for dedup (FNV-1a over the integer bytes)
 	static uint64_t fingerprint(const std::vector<int32_t> &v);
 
-	// BFS state: (current_coverage, ids_used, last_candidate_index)
 	struct BFSState {
 		std::vector<int32_t> px;
 		Bloom256 bloom;
 		std::vector<int64_t> ids;
-		int32_t last_idx; // prevents duplicate pairs
-		uint64_t fp;      // fingerprint for dedup
+		int32_t last_idx;
+		uint64_t fp;
 	};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bloom computation without salt table (self-contained mode)
-// Uses two rounds of xxhash-style mixing to spread bits across 256 bits.
+// Bloom computation 
 // ─────────────────────────────────────────────────────────────────────────────
 
 inline Bloom256 Bloom256::from_pixels(const std::vector<int32_t> &pixels) {
 	Bloom256 b;
 	for (int32_t p : pixels) {
-		// Mix the pixel ID into 4 different bit positions
-		// Using different multipliers per word to decorrelate
 		uint32_t h = static_cast<uint32_t>(p);
 		h ^= h >> 16;
 		h *= 0x45d9f3b;
